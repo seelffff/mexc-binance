@@ -11,21 +11,25 @@ import { Logger } from './utils/logger.js';
 import { CompactLogger } from './utils/compact-logger.js';
 import { randomUUID } from 'crypto';
 import type { TuiDashboard } from './utils/tui.js';
+import type { BinanceFutures } from './exchanges/binance-futures.js';
+import type { MexcFutures } from './exchanges/mexc-futures.js';
 
 export class TradeExecutor {
   private config: Config;
   private logger: Logger;
   private compactLogger: CompactLogger;
   private tui?: TuiDashboard; // Ссылка на TUI
+  private binance?: BinanceFutures; // Экземпляр Binance для реальных ордеров
+  private mexc?: MexcFutures; // Экземпляр MEXC для реальных ордеров
 
   private openPositions: Map<string, PositionPair> = new Map();
   private closedPositions: PositionPair[] = [];
   private skippedOpportunities: SkippedOpportunity[] = [];
-  
+
   private checkInterval: NodeJS.Timeout | null = null;
   private priceHistoryInterval: NodeJS.Timeout | null = null;
   private getPricesFn?: (symbol: string) => { buyPrice: number; sellPrice: number } | null;
-  
+
   private currentBalance: number;
   private initialBalance: number;
 
@@ -37,12 +41,24 @@ export class TradeExecutor {
     totalLoss: 0,
   };
 
-  constructor(config: Config, logger?: Logger) {
+  // Rate limiting для защиты от "too frequent" ошибок
+  private lastOrderTime = 0;
+  private readonly MIN_ORDER_INTERVAL_MS = 2000; // 2 секунды между ордерами
+  private pendingOrders = 0; // Счетчик одновременных попыток создания ордеров
+
+  constructor(
+    config: Config,
+    logger?: Logger,
+    binance?: BinanceFutures,
+    mexc?: MexcFutures
+  ) {
     this.config = config;
     this.logger = logger || new Logger();
     this.compactLogger = new CompactLogger(config);
     this.initialBalance = config.trading.testBalanceUSD;
     this.currentBalance = config.trading.testBalanceUSD;
+    this.binance = binance;
+    this.mexc = mexc;
   }
 
   public setTui(tui: TuiDashboard) {
@@ -57,8 +73,8 @@ export class TradeExecutor {
     if (!this.config.trading.enabled) return;
 
     // Обновляем TUI каждые 500мс для плавности отображения
-    this.checkInterval = setInterval(() => {
-      this.checkPositionTimeouts();
+    this.checkInterval = setInterval(async () => {
+      await this.checkPositionTimeouts();
       // Обновляем TUI позиции
       if(this.tui) this.tui.updatePositions(Array.from(this.openPositions.values()));
     }, 500);
@@ -162,6 +178,22 @@ export class TradeExecutor {
   // ===================================================
 
   async openPositionPair(opportunity: ArbitrageOpportunity): Promise<void> {
+    // RATE LIMITING: Не открываем если уже создается другой ордер
+    if (this.pendingOrders > 0) {
+      this.logger.warn(`Пропускаем ${opportunity.symbol} - уже создается другой ордер`);
+      this.recordSkippedOpportunity(opportunity, "RATE_LIMIT_PENDING");
+      return;
+    }
+
+    // RATE LIMITING: Ждем если с последнего ордера прошло меньше MIN_ORDER_INTERVAL_MS
+    const now = Date.now();
+    const timeSinceLastOrder = now - this.lastOrderTime;
+    if (this.lastOrderTime > 0 && timeSinceLastOrder < this.MIN_ORDER_INTERVAL_MS) {
+      const waitTime = this.MIN_ORDER_INTERVAL_MS - timeSinceLastOrder;
+      this.logger.info(`Rate limit: ждем ${waitTime}ms перед следующим ордером...`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+
     const requiredCapital = this.config.trading.positionSizeUSD * 2;
     if (this.currentBalance < requiredCapital) {
       this.recordSkippedOpportunity(opportunity, "INSUFFICIENT_BALANCE");
@@ -190,7 +222,6 @@ export class TradeExecutor {
     }
 
     const pairId = randomUUID();
-    const now = Date.now();
     const timeoutAt = this.config.trading.positionTimeoutSeconds === 0
       ? Infinity
       : now + this.config.trading.positionTimeoutSeconds * 1000;
@@ -229,6 +260,103 @@ export class TradeExecutor {
       ? opportunity.buyPrice
       : opportunity.sellPrice;
 
+    // ===== РЕАЛЬНАЯ ТОРГОВЛЯ =====
+    if (!this.config.trading.testMode) {
+      // Увеличиваем счетчик одновременных ордеров
+      this.pendingOrders++;
+
+      try {
+        // БЕЗОПАСНОСТЬ: Проверяем лимиты перед реальными ордерами
+        if (this.config.trading.positionSizeUSD > 100) {
+          this.logger.error(`ОТКЛОНЕНО: Размер позиции $${this.config.trading.positionSizeUSD} > $100. Для безопасности измените positionSizeUSD в config.json`);
+          this.recordSkippedOpportunity(opportunity, 'POSITION_SIZE_TOO_LARGE');
+          this.pendingOrders--;
+          return;
+        }
+
+        if (this.openPositions.size >= this.config.trading.maxOpenPositions) {
+          this.recordSkippedOpportunity(opportunity, 'MAX_POSITIONS_REACHED');
+          this.pendingOrders--;
+          return;
+        }
+
+        this.logger.warn(`⚠️  РЕАЛЬНАЯ ТОРГОВЛЯ: Открываем позицию ${opportunity.symbol}...`);
+
+        // Установить leverage на обеих биржах (не критично если не получится)
+        try {
+          if (this.binance && longPosition.exchange === 'binance') {
+            await this.binance.setLeverage(opportunity.symbol, this.config.trading.leverage);
+          }
+          if (this.binance && shortPosition.exchange === 'binance') {
+            await this.binance.setLeverage(opportunity.symbol, this.config.trading.leverage);
+          }
+        } catch (error) {
+          this.logger.warn(`Binance leverage warning (продолжаем): ${error instanceof Error ? error.message : String(error)}`);
+        }
+
+        try {
+          const mexcSymbol = opportunity.symbol.replace('USDT', '_USDT');
+          if (this.mexc && longPosition.exchange === 'mexc') {
+            await this.mexc.setLeverage(mexcSymbol, this.config.trading.leverage);
+          }
+          if (this.mexc && shortPosition.exchange === 'mexc') {
+            await this.mexc.setLeverage(mexcSymbol, this.config.trading.leverage);
+          }
+        } catch (error) {
+          this.logger.warn(`MEXC leverage warning (продолжаем): ${error instanceof Error ? error.message : String(error)}`);
+        }
+
+        // Открываем LONG позицию
+        if (longPosition.exchange === 'binance' && this.binance) {
+          await this.binance.createMarketOrder(
+            opportunity.symbol,
+            'BUY',
+            longPosition.quantity,
+            false
+          );
+        } else if (longPosition.exchange === 'mexc' && this.mexc) {
+          const mexcSymbol = opportunity.symbol.replace('USDT', '_USDT');
+          await this.mexc.createMarketOrder(
+            mexcSymbol,
+            1, // Open Long
+            Math.floor(longPosition.quantity)
+          );
+        }
+
+        // Задержка 500ms между ордерами для предотвращения rate limit
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        // Открываем SHORT позицию
+        if (shortPosition.exchange === 'binance' && this.binance) {
+          await this.binance.createMarketOrder(
+            opportunity.symbol,
+            'SELL',
+            shortPosition.quantity,
+            false
+          );
+        } else if (shortPosition.exchange === 'mexc' && this.mexc) {
+          const mexcSymbol = opportunity.symbol.replace('USDT', '_USDT');
+          await this.mexc.createMarketOrder(
+            mexcSymbol,
+            3, // Open Short
+            Math.floor(shortPosition.quantity)
+          );
+        }
+
+        this.logger.success(`✓ РЕАЛЬНЫЕ ОРДЕРА СОЗДАНЫ: ${opportunity.symbol}`);
+
+        // Обновляем время последнего ордера и уменьшаем счетчик
+        this.lastOrderTime = Date.now();
+        this.pendingOrders--;
+      } catch (error) {
+        this.logger.error(`ОШИБКА создания реальных ордеров: ${error instanceof Error ? error.message : String(error)}`);
+        this.recordSkippedOpportunity(opportunity, 'ORDER_CREATION_FAILED');
+        this.pendingOrders--;
+        return;
+      }
+    }
+    // ===== КОНЕЦ РЕАЛЬНОЙ ТОРГОВЛИ =====
+
     const positionPair: PositionPair = {
       id: pairId,
       symbol: opportunity.symbol,
@@ -245,10 +373,30 @@ export class TradeExecutor {
     };
 
     this.openPositions.set(pairId, positionPair);
-    this.currentBalance -= requiredCapital;
+
+    // Обновляем баланс
+    if (this.config.trading.testMode) {
+      this.currentBalance -= requiredCapital;
+    } else {
+      // В реальном режиме получаем актуальный баланс с биржи
+      try {
+        if (this.binance) {
+          const binanceBalance = await this.binance.getBalance();
+          if (this.mexc) {
+            const mexcBalance = await this.mexc.getBalance();
+            this.currentBalance = Math.min(binanceBalance, mexcBalance);
+          } else {
+            this.currentBalance = binanceBalance;
+          }
+        }
+      } catch (error) {
+        this.logger.warn(`Не удалось получить реальный баланс: ${error}`);
+      }
+    }
 
     // Пишем красивый лог
-    this.logger.trade(`OPEN ${opportunity.symbol}: Spread ${opportunity.spreadPercent.toFixed(2)}%. Est. Profit: ${opportunity.profitPercent.toFixed(2)}%`);
+    const mode = this.config.trading.testMode ? '[TEST]' : '[REAL]';
+    this.logger.trade(`${mode} OPEN ${opportunity.symbol}: Spread ${opportunity.spreadPercent.toFixed(2)}%. Est. Profit: ${opportunity.profitPercent.toFixed(2)}%`);
     if (this.tui) {
       this.tui.log(`{green-fg}✓ Открыта позиция ${opportunity.symbol}: Binance @ ${originalBinancePrice.toFixed(4)}, MEXC @ ${originalMexcPrice.toFixed(4)}{/}`);
     }
@@ -257,7 +405,7 @@ export class TradeExecutor {
     if(this.tui) this.tui.updatePositions(Array.from(this.openPositions.values()));
   }
 
-  updatePositionSpread(symbol: string, currentBuyPrice: number, currentSellPrice: number): void {
+  async updatePositionSpread(symbol: string, currentBuyPrice: number, currentSellPrice: number): Promise<void> {
     for (const [pairId, pair] of this.openPositions.entries()) {
       if (pair.symbol === symbol && pair.status === 'OPEN') {
         const currentSpread = ((currentSellPrice - currentBuyPrice) / currentBuyPrice) * 100;
@@ -293,7 +441,7 @@ export class TradeExecutor {
             if (this.tui) {
               this.tui.log(`{cyan-fg}⚠ Цены сошлись на ${symbol}! Разница: ${priceDiff.toFixed(3)}%. Закрываю позицию...{/}`);
             }
-            this.closePositionPair(pairId, 'CONVERGENCE', currentBuyPrice, currentSellPrice);
+            await this.closePositionPair(pairId, 'CONVERGENCE', currentBuyPrice, currentSellPrice);
           }
         }
       }
@@ -308,12 +456,12 @@ export class TradeExecutor {
     return priceDiffPercent <= this.config.trading.priceConvergencePercent;
   }
 
-  private closePositionPair(
+  private async closePositionPair(
     pairId: string,
     reason: CloseReason,
     currentBuyPrice: number,
     currentSellPrice: number
-  ): void {
+  ): Promise<void> {
     const pair = this.openPositions.get(pairId);
     if (!pair) return;
 
@@ -348,10 +496,78 @@ export class TradeExecutor {
     pair.shortPosition.pnl = (shortPnlPercent / 100) * this.config.trading.positionSizeUSD;
     pair.shortPosition.pnlPercent = shortPnlPercent;
 
+    // ===== РЕАЛЬНАЯ ТОРГОВЛЯ: Закрываем позиции =====
+    if (!this.config.trading.testMode) {
+      try {
+        this.logger.warn(`⚠️  РЕАЛЬНАЯ ТОРГОВЛЯ: Закрываем позицию ${pair.symbol}...`);
+
+        // Закрываем LONG позицию (продаем то что купили)
+        if (pair.longPosition.exchange === 'binance' && this.binance) {
+          await this.binance.createMarketOrder(
+            pair.symbol,
+            'SELL',
+            pair.longPosition.quantity,
+            true // reduceOnly = true для закрытия позиции
+          );
+        } else if (pair.longPosition.exchange === 'mexc' && this.mexc) {
+          const mexcSymbol = pair.symbol.replace('USDT', '_USDT');
+          await this.mexc.createMarketOrder(
+            mexcSymbol,
+            4, // Close Long
+            Math.floor(pair.longPosition.quantity)
+          );
+        }
+
+        // Задержка 500ms между ордерами для предотвращения rate limit
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        // Закрываем SHORT позицию (покупаем обратно то что продали)
+        if (pair.shortPosition.exchange === 'binance' && this.binance) {
+          await this.binance.createMarketOrder(
+            pair.symbol,
+            'BUY',
+            pair.shortPosition.quantity,
+            true // reduceOnly = true
+          );
+        } else if (pair.shortPosition.exchange === 'mexc' && this.mexc) {
+          const mexcSymbol = pair.symbol.replace('USDT', '_USDT');
+          await this.mexc.createMarketOrder(
+            mexcSymbol,
+            2, // Close Short
+            Math.floor(pair.shortPosition.quantity)
+          );
+        }
+
+        this.logger.success(`✓ РЕАЛЬНЫЕ ПОЗИЦИИ ЗАКРЫТЫ: ${pair.symbol}`);
+      } catch (error) {
+        this.logger.error(`ОШИБКА закрытия реальных позиций: ${error instanceof Error ? error.message : String(error)}`);
+        // Продолжаем обработку даже если реальное закрытие не удалось (позиция будет помечена как закрытая локально)
+      }
+    }
+    // ===== КОНЕЦ РЕАЛЬНОЙ ТОРГОВЛИ =====
+
     this.openPositions.delete(pairId);
     this.closedPositions.push(pair);
 
-    this.currentBalance += (this.config.trading.positionSizeUSD * 2) + totalPnlUSD;
+    // Обновляем баланс
+    if (this.config.trading.testMode) {
+      this.currentBalance += (this.config.trading.positionSizeUSD * 2) + totalPnlUSD;
+    } else {
+      // В реальном режиме получаем актуальный баланс с биржи
+      try {
+        if (this.binance) {
+          const binanceBalance = await this.binance.getBalance();
+          if (this.mexc) {
+            const mexcBalance = await this.mexc.getBalance();
+            this.currentBalance = Math.min(binanceBalance, mexcBalance);
+          } else {
+            this.currentBalance = binanceBalance;
+          }
+        }
+      } catch (error) {
+        this.logger.warn(`Не удалось получить реальный баланс: ${error}`);
+      }
+    }
 
     // Статистика
     this.testStats.totalTrades++;
@@ -399,7 +615,7 @@ export class TradeExecutor {
   /**
    * Принудительно закрыть все открытые позиции (для graceful shutdown)
    */
-  forceCloseAllPositions(): void {
+  async forceCloseAllPositions(): Promise<void> {
     const positions = Array.from(this.openPositions.entries());
 
     for (const [pairId, pair] of positions) {
@@ -407,13 +623,13 @@ export class TradeExecutor {
         const prices = this.getPricesFn(pair.symbol);
         if (prices) {
           this.logger.warn(`FORCE CLOSE ${pair.symbol} по Ctrl+C`);
-          this.closePositionPair(pairId, 'FORCE_SHUTDOWN', prices.buyPrice, prices.sellPrice);
+          await this.closePositionPair(pairId, 'FORCE_SHUTDOWN', prices.buyPrice, prices.sellPrice);
         }
       }
     }
   }
 
-  private checkPositionTimeouts() {
+  private async checkPositionTimeouts(): Promise<void> {
       // Логика таймаутов аналогична методу updatePositionSpread, вызывает closePositionPair
       const now = Date.now();
       for (const [pairId, pair] of this.openPositions.entries()) {
@@ -422,7 +638,7 @@ export class TradeExecutor {
                if (this.getPricesFn) {
                    const prices = this.getPricesFn(pair.symbol);
                    if (prices) {
-                       this.closePositionPair(pairId, 'TIMEOUT', prices.buyPrice, prices.sellPrice);
+                       await this.closePositionPair(pairId, 'TIMEOUT', prices.buyPrice, prices.sellPrice);
                    }
                }
           }

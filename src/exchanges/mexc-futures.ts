@@ -34,19 +34,25 @@ export class MexcFutures {
   private reconnectDelay: number;
   private pingInterval: NodeJS.Timeout | null = null;
   private wsMonitor: WebSocketMonitor | null = null;
+  private apiKey?: string;
+  private apiSecret?: string;
 
   constructor(
     restBaseUrl: string,
     wsBaseUrl: string,
     reconnectDelay = 3000,
     logger?: Logger,
-    wsMonitor?: WebSocketMonitor
+    wsMonitor?: WebSocketMonitor,
+    apiKey?: string,
+    apiSecret?: string
   ) {
     this.restBaseUrl = restBaseUrl;
     this.wsBaseUrl = wsBaseUrl;
     this.reconnectDelay = reconnectDelay;
     this.logger = logger || new Logger();
     this.wsMonitor = wsMonitor || null;
+    this.apiKey = apiKey;
+    this.apiSecret = apiSecret;
   }
 
   async getTopPairs(limit = 50): Promise<TradingPair[]> {
@@ -224,6 +230,181 @@ export class MexcFutures {
       return response.ok;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Создать рыночный ордер на MEXC Futures
+   * @param symbol Символ в формате MEXC (например, BTC_USDT)
+   * @param side 1 = Open Long, 2 = Close Short, 3 = Open Short, 4 = Close Long
+   * @param vol Количество контрактов
+   */
+  async createMarketOrder(
+    symbol: string,
+    side: 1 | 2 | 3 | 4,
+    vol: number
+  ): Promise<any> {
+    if (!this.apiKey || !this.apiSecret) {
+      throw new Error('MEXC: API ключи не установлены');
+    }
+
+    const crypto = await import('crypto');
+    const timestamp = Date.now();
+
+    // Параметры тела запроса (БЕЗ timestamp и signature)
+    const bodyParams: any = {
+      symbol,
+      price: 0,
+      vol,
+      side,
+      type: 5, // Market order
+      openType: 2, // Cross margin
+    };
+
+    const bodyString = JSON.stringify(bodyParams);
+
+    // MEXC подпись: AccessKey + Timestamp + Body JSON
+    const signaturePayload = this.apiKey + timestamp + bodyString;
+
+    const signature = crypto
+      .createHmac('sha256', this.apiSecret)
+      .update(signaturePayload)
+      .digest('hex');
+
+    const url = `${this.restBaseUrl}/api/v1/private/order/submit`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'ApiKey': this.apiKey,
+          'Request-Time': timestamp.toString(),
+          'Signature': signature,
+          'Content-Type': 'application/json',
+        },
+        body: bodyString,
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`MEXC order failed: ${response.status} - ${errorText}`);
+      }
+
+      const result = await response.json();
+
+      if (!result.success) {
+        throw new Error(`MEXC order failed: ${result.code} - ${JSON.stringify(result)}`);
+      }
+
+      this.logger.success(`MEXC: Ордер создан - side ${side} vol ${vol} ${symbol}`);
+      return result;
+    } catch (error) {
+      this.logger.error(`MEXC: Ошибка создания ордера - ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Установить leverage для символа
+   */
+  async setLeverage(symbol: string, leverage: number): Promise<any> {
+    if (!this.apiKey || !this.apiSecret) {
+      throw new Error('MEXC: API ключи не установлены');
+    }
+
+    const crypto = await import('crypto');
+    const timestamp = Date.now();
+
+    const bodyParams: any = {
+      symbol,
+      leverage,
+      openType: 2, // Cross margin
+    };
+
+    const bodyString = JSON.stringify(bodyParams);
+
+    // MEXC подпись: AccessKey + Timestamp + Body JSON
+    const signaturePayload = this.apiKey + timestamp + bodyString;
+
+    const signature = crypto
+      .createHmac('sha256', this.apiSecret)
+      .update(signaturePayload)
+      .digest('hex');
+
+    const url = `${this.restBaseUrl}/api/v1/private/position/leverage`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'ApiKey': this.apiKey,
+          'Request-Time': timestamp.toString(),
+          'Signature': signature,
+          'Content-Type': 'application/json',
+        },
+        body: bodyString,
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`MEXC leverage failed: ${response.status} - ${errorText}`);
+      }
+
+      return await response.json();
+    } catch (error) {
+      this.logger.error(`MEXC: Ошибка установки leverage - ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Получить текущий баланс
+   */
+  async getBalance(): Promise<number> {
+    if (!this.apiKey || !this.apiSecret) {
+      throw new Error('MEXC: API ключи не установлены');
+    }
+
+    const crypto = await import('crypto');
+    const timestamp = Date.now();
+
+    // Для GET запросов: AccessKey + Timestamp (пустое тело)
+    const signaturePayload = this.apiKey + timestamp;
+
+    const signature = crypto
+      .createHmac('sha256', this.apiSecret)
+      .update(signaturePayload)
+      .digest('hex');
+
+    const url = `${this.restBaseUrl}/api/v1/private/account/assets`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'ApiKey': this.apiKey,
+          'Request-Time': timestamp.toString(),
+          'Signature': signature,
+        },
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`MEXC balance failed: ${response.status} - ${errorText}`);
+      }
+
+      const result = await response.json();
+
+      if (!result.success || !result.data) {
+        throw new Error(`MEXC balance failed: ${JSON.stringify(result)}`);
+      }
+
+      // Ищем USDT баланс
+      const usdtAsset = result.data.find((a: any) => a.currency === 'USDT');
+      return usdtAsset ? parseFloat(usdtAsset.availableBalance) : 0;
+    } catch (error) {
+      this.logger.error(`MEXC: Ошибка получения баланса - ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
     }
   }
 

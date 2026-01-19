@@ -24,9 +24,19 @@ async function main() {
     // Валидацию делаем тихо, чтобы не ломать верстку консоль-логами
     // configLoader.validate();
     const config = configLoader.getConfig();
+    const apiKeys = configLoader.getApiKeys();
 
     // 4. Создаем детектор
-    detector = new ArbitrageDetector(config, logger);
+    detector = new ArbitrageDetector(
+      config,
+      logger,
+      {
+        binanceKey: apiKeys.BINANCE_API_KEY,
+        binanceSecret: apiKeys.BINANCE_API_SECRET,
+        mexcKey: apiKeys.MEXC_API_KEY,
+        mexcSecret: apiKeys.MEXC_API_SECRET,
+      }
+    );
     detector.setTui(tui); // Обязательно связываем!
 
     // 5. Обработка graceful shutdown (Ctrl+C)
@@ -38,7 +48,7 @@ async function main() {
         if (detector) {
           // 1. Принудительно закрыть все позиции
           const tradeExecutor = detector.getTradeExecutor();
-          tradeExecutor.forceCloseAllPositions();
+          await tradeExecutor.forceCloseAllPositions();
 
           // 2. Получить данные для отчета
           const stats = tradeExecutor.getStats();

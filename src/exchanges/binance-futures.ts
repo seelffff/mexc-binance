@@ -16,19 +16,25 @@ export class BinanceFutures {
   private reconnectDelay: number;
   private pingInterval: NodeJS.Timeout | null = null;
   private wsMonitor: WebSocketMonitor | null = null;
+  private apiKey?: string;
+  private apiSecret?: string;
 
   constructor(
     restBaseUrl: string,
     wsBaseUrl: string,
     reconnectDelay = 3000,
     logger?: Logger,
-    wsMonitor?: WebSocketMonitor
+    wsMonitor?: WebSocketMonitor,
+    apiKey?: string,
+    apiSecret?: string
   ) {
     this.restBaseUrl = restBaseUrl;
     this.wsBaseUrl = wsBaseUrl;
     this.reconnectDelay = reconnectDelay;
     this.logger = logger || new Logger();
     this.wsMonitor = wsMonitor || null;
+    this.apiKey = apiKey;
+    this.apiSecret = apiSecret;
   }
 
   /**
@@ -196,6 +202,176 @@ export class BinanceFutures {
       return response.ok;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Создать рыночный ордер на Binance Futures
+   * @param symbol Символ (например, BTCUSDT)
+   * @param side BUY или SELL
+   * @param quantity Количество в базовой валюте
+   * @param reduceOnly Только для закрытия позиции (default: false)
+   */
+  async createMarketOrder(
+    symbol: string,
+    side: 'BUY' | 'SELL',
+    quantity: number,
+    reduceOnly = false
+  ): Promise<any> {
+    if (!this.apiKey || !this.apiSecret) {
+      throw new Error('Binance: API ключи не установлены');
+    }
+
+    const crypto = await import('crypto');
+    const timestamp = Date.now();
+
+    // ВАЖНО: Параметры должны быть отсортированы по алфавиту для правильной подписи
+    const paramsObj: Record<string, string> = {
+      quantity: quantity.toString(),
+      side,
+      symbol,
+      timestamp: timestamp.toString(),
+      type: 'MARKET',
+    };
+
+    // Добавляем reduceOnly только если true (для закрытия позиций)
+    if (reduceOnly) {
+      paramsObj.reduceOnly = 'true';
+    }
+
+    // Сортируем параметры и создаем query string
+    const queryString = Object.keys(paramsObj)
+      .sort()
+      .map(key => `${key}=${paramsObj[key]}`)
+      .join('&');
+
+    const signature = crypto
+      .createHmac('sha256', this.apiSecret)
+      .update(queryString)
+      .digest('hex');
+
+    const finalQueryString = `${queryString}&signature=${signature}`;
+
+    const url = `${this.restBaseUrl}/fapi/v1/order`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'X-MBX-APIKEY': this.apiKey,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: finalQueryString,
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Binance order failed: ${response.status} - ${errorText}`);
+      }
+
+      const result = await response.json();
+      this.logger.success(`Binance: Ордер создан - ${side} ${quantity} ${symbol}`);
+      return result;
+    } catch (error) {
+      this.logger.error(`Binance: Ошибка создания ордера - ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Установить leverage для символа
+   */
+  async setLeverage(symbol: string, leverage: number): Promise<any> {
+    if (!this.apiKey || !this.apiSecret) {
+      throw new Error('Binance: API ключи не установлены');
+    }
+
+    const crypto = await import('crypto');
+    const timestamp = Date.now();
+
+    // ВАЖНО: Параметры должны быть отсортированы по алфавиту для правильной подписи
+    const paramsObj: Record<string, string> = {
+      leverage: leverage.toString(),
+      symbol,
+      timestamp: timestamp.toString(),
+    };
+
+    // Сортируем параметры и создаем query string
+    const queryString = Object.keys(paramsObj)
+      .sort()
+      .map(key => `${key}=${paramsObj[key]}`)
+      .join('&');
+
+    const signature = crypto
+      .createHmac('sha256', this.apiSecret)
+      .update(queryString)
+      .digest('hex');
+
+    const finalQueryString = `${queryString}&signature=${signature}`;
+
+    const url = `${this.restBaseUrl}/fapi/v1/leverage`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'X-MBX-APIKEY': this.apiKey,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: finalQueryString,
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Binance leverage failed: ${response.status} - ${errorText}`);
+      }
+
+      return await response.json();
+    } catch (error) {
+      this.logger.error(`Binance: Ошибка установки leverage - ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Получить текущий баланс
+   */
+  async getBalance(): Promise<number> {
+    if (!this.apiKey || !this.apiSecret) {
+      throw new Error('Binance: API ключи не установлены');
+    }
+
+    const crypto = await import('crypto');
+    const timestamp = Date.now();
+
+    const queryString = `timestamp=${timestamp}`;
+
+    const signature = crypto
+      .createHmac('sha256', this.apiSecret)
+      .update(queryString)
+      .digest('hex');
+
+    const url = `${this.restBaseUrl}/fapi/v2/balance?${queryString}&signature=${signature}`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'X-MBX-APIKEY': this.apiKey,
+        },
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Binance balance failed: ${response.status} - ${errorText}`);
+      }
+
+      const balances = await response.json();
+      const usdtBalance = balances.find((b: any) => b.asset === 'USDT');
+      return usdtBalance ? parseFloat(usdtBalance.availableBalance) : 0;
+    } catch (error) {
+      this.logger.error(`Binance: Ошибка получения баланса - ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
     }
   }
 }

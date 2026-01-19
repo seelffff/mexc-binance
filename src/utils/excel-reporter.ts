@@ -609,10 +609,16 @@ export class ExcelReporter {
 
     // Данные
     skippedOpportunities.forEach((opp) => {
-      const reasonText =
-        opp.reason === 'INSUFFICIENT_BALANCE' ? 'Недостаточно баланса' :
-        opp.reason === 'POSITION_NOT_PROFITABLE' ? 'Текущая позиция не прибыльна' :
-        'Нет свободных слотов';
+      const reasonMap: Record<string, string> = {
+        'INSUFFICIENT_BALANCE': '💰 Недостаточно баланса',
+        'POSITION_NOT_PROFITABLE': '📉 Текущая позиция не прибыльна',
+        'MAX_POSITIONS_REACHED': '🚫 Нет свободных слотов',
+        'RATE_LIMIT_PENDING': '⏱️ Rate limit - уже создается другой ордер',
+        'ORDER_CREATION_FAILED': '❌ Ошибка создания ордера на бирже',
+        'POSITION_SIZE_TOO_LARGE': '⚠️ Размер позиции превышает лимит безопасности',
+      };
+
+      const reasonText = reasonMap[opp.reason as string] || `Неизвестная причина: ${opp.reason}`;
 
       sheet.addRow({
         timestamp: new Date(opp.timestamp).toLocaleString('ru-RU'),

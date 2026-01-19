@@ -28,7 +28,16 @@ export class ArbitrageDetector {
   private opportunitiesFound = 0;
   private totalComparisons = 0;
 
-  constructor(config: Config, logger?: Logger) {
+  constructor(
+    config: Config,
+    logger?: Logger,
+    apiKeys?: {
+      binanceKey?: string;
+      binanceSecret?: string;
+      mexcKey?: string;
+      mexcSecret?: string;
+    }
+  ) {
     this.config = config;
     this.logger = logger || new Logger();
 
@@ -39,7 +48,9 @@ export class ArbitrageDetector {
       config.exchanges.binance.wsBaseUrl,
       config.arbitrage.reconnectDelayMs,
       this.logger,
-      this.wsMonitor
+      this.wsMonitor,
+      apiKeys?.binanceKey,
+      apiKeys?.binanceSecret
     );
 
     this.mexc = new MexcFutures(
@@ -47,10 +58,17 @@ export class ArbitrageDetector {
       config.exchanges.mexc.wsBaseUrl,
       config.arbitrage.reconnectDelayMs,
       this.logger,
-      this.wsMonitor
+      this.wsMonitor,
+      apiKeys?.mexcKey,
+      apiKeys?.mexcSecret
     );
 
-    this.tradeExecutor = new TradeExecutor(config, this.logger);
+    this.tradeExecutor = new TradeExecutor(
+      config,
+      this.logger,
+      this.binance,
+      this.mexc
+    );
     this.tradeExecutor.setPriceGetter((symbol: string) => this.getCurrentPrices(symbol));
   }
 
@@ -129,7 +147,7 @@ export class ArbitrageDetector {
     this.logger.success('WebSocket запущен');
   }
 
-  private onPriceUpdate(price: TickerPrice): void {
+  private async onPriceUpdate(price: TickerPrice): Promise<void> {
     const normalizedSymbol = MexcFutures.toCommonFormat(price.symbol);
     let otherPrice: TickerPrice | undefined;
 
@@ -142,14 +160,14 @@ export class ArbitrageDetector {
 
     if (!otherPrice) return;
 
-    this.checkArbitrage(price, otherPrice, normalizedSymbol);
+    await this.checkArbitrage(price, otherPrice, normalizedSymbol);
   }
 
-  private checkArbitrage(
+  private async checkArbitrage(
     price1: TickerPrice,
     price2: TickerPrice,
     symbol: string
-  ): void {
+  ): Promise<void> {
     this.totalComparisons++;
 
     let buyExchange: 'binance' | 'mexc';
@@ -213,7 +231,7 @@ export class ArbitrageDetector {
 
     // ВАЖНО: Обновляем цены для всех открытых позиций НЕЗАВИСИМО от наличия арбитража
     // Это гарантирует что TUI показывает актуальные цены даже когда спред < minSpreadPercent
-    this.tradeExecutor.updatePositionSpread(symbol, buyPrice, sellPrice);
+    await this.tradeExecutor.updatePositionSpread(symbol, buyPrice, sellPrice);
 
     if (spreadPercent < this.config.arbitrage.minSpreadPercent) return;
 
