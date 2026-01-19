@@ -1,0 +1,89 @@
+{
+  "_comment": "Конфигурация для арбитражного бота между Binance и MEXC Futures",
+
+  "exchanges": {
+    "_comment": "Настройки подключения к биржам",
+
+    "binance": {
+      "_comment": "Binance USDT-M Futures - крупнейшая криптобиржа",
+      "apiKey": "YOUR_BINANCE_API_KEY_HERE",
+      "_apiKey": "API ключ из Binance (получить в API Management). Для публичных данных не обязателен!",
+      "apiSecret": "YOUR_BINANCE_API_SECRET_HERE",
+      "_apiSecret": "Секретный ключ - НИКОГДА не публикуй в Git! Нужен только для торговли",
+      "restBaseUrl": "https://fapi.binance.com",
+      "_restBaseUrl": "REST API базовый URL (для fallback и дополнительных запросов)",
+      "wsBaseUrl": "wss://fstream.binance.com",
+      "_wsBaseUrl": "WebSocket URL для получения цен в реальном времени",
+      "enabled": true,
+      "_enabled": "Включить/выключить мониторинг этой биржи (true/false)"
+    },
+
+    "mexc": {
+      "_comment": "MEXC Futures - альтернативная биржа с хорошей ликвидностью",
+      "apiKey": "YOUR_MEXC_API_KEY_HERE",
+      "_apiKey": "API ключ из MEXC (получить в Account → API Management). Для публичных данных не обязателен!",
+      "apiSecret": "YOUR_MEXC_API_SECRET_HERE",
+      "_apiSecret": "Секретный ключ - НИКОГДА не публикуй в Git! Нужен только для торговли",
+      "restBaseUrl": "https://contract.mexc.com",
+      "_restBaseUrl": "REST API базовый URL (для получения списка пар и fallback)",
+      "wsBaseUrl": "wss://contract.mexc.com/edge",
+      "_wsBaseUrl": "WebSocket URL для получения цен в реальном времени",
+      "enabled": true,
+      "_enabled": "Включить/выключить мониторинг этой биржи (true/false)"
+    }
+  },
+
+  "arbitrage": {
+    "_comment": "Параметры поиска арбитражных возможностей",
+
+    "minSpreadPercent": 0.65,
+    "_minSpreadPercent": "Минимальный спред для детектирования в % (0.5-1.0%). Ниже не покрывает комиссии (~0.05% на вход + 0.05% на выход = 0.1% минимум)",
+
+    "topPairsCount": 50,
+    "_topPairsCount": "Сколько топ пар по объему мониторить (топ 50 = самые ликвидные, меньше проскальзывания)",
+
+    "useWebSocket": true,
+    "_useWebSocket": "Использовать WebSocket для получения цен (ОБЯЗАТЕЛЬНО true для арбитража!). REST API слишком медленный",
+
+    "restFallbackIntervalMs": 5000,
+    "_restFallbackIntervalMs": "Интервал REST запросов если WebSocket недоступен (НЕ рекомендуется для реального арбитража)",
+
+    "reconnectDelayMs": 3000,
+    "_reconnectDelayMs": "Задержка перед переподключением WebSocket при обрыве связи",
+
+    "excludePairs": [],
+    "_excludePairs": "Массив пар для исключения из мониторинга, например: ['BTCUSDT', 'ETHUSDT']"
+  },
+
+  "notifications": {
+    "_comment": "Настройки уведомлений об арбитраже",
+
+    "logToConsole": true,
+    "_logToConsole": "Выводить найденные возможности в консоль (true/false)",
+
+    "minSpreadToNotify": 1.0,
+    "_minSpreadToNotify": "Минимальный спред в % для отправки уведомления (чтобы не спамить при малых спредах)",
+
+    "showTimestamp": true,
+    "_showTimestamp": "Показывать время обнаружения арбитража",
+
+    "coloredOutput": true,
+    "_coloredOutput": "Цветной вывод в консоль (зеленый = прибыль, красный = убыток)"
+  },
+
+  "fees": {
+    "_comment": "Комиссии бирж для точного расчета прибыли",
+
+    "binance": {
+      "maker": 0.02,
+      "taker": 0.04,
+      "_comment": "Комиссии Binance Futures в % (maker/taker). Проверь свой VIP уровень!"
+    },
+
+    "mexc": {
+      "maker": 0.0,
+      "taker": 0.03,
+      "_comment": "Комиссии MEXC Futures в % (обычно maker = 0%, taker = 0.03%)"
+    }
+  }
+}

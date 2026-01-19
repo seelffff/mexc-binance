@@ -1,0 +1,42 @@
+{
+  "compilerOptions": {
+    // Целевая версия JavaScript (ES2020 поддерживается всеми современными Node.js)
+    "target": "ES2020",
+
+    // Система модулей (ESNext для современных ES модулей)
+    "module": "ESNext",
+    "moduleResolution": "node",
+
+    // Совместимость с CommonJS модулями
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+
+    // Куда компилируется код
+    "outDir": "./build",
+    "rootDir": "./src",
+
+    // Строгая проверка типов (ВАЖНО для качества кода!)
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+
+    // Дополнительные проверки
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+
+    // Генерация source maps для дебага
+    "sourceMap": true,
+
+    // Удаление комментариев в продакшене
+    "removeComments": true,
+
+    // Оптимизации
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "build"]
+}

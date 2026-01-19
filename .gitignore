@@ -1,0 +1,35 @@
+# Зависимости
+node_modules/
+
+# Собранные файлы
+build/
+dist/
+
+# Логи
+*.log
+npm-debug.log*
+logs/
+
+# Отчеты
+reports/
+
+# Переменные окружения
+.env
+.env.local
+
+# Конфигурация (используйте config.example.json)
+config.json
+
+# Системные файлы
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+TYPESCRIPT_PROJECT_SETUP.md
+CHANGELOG.md
+EXCEL_REPORTS.md

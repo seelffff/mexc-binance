@@ -1,0 +1,48 @@
+{
+  "name": "newrep",
+  "version": "1.0.0",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "nodemon --exec tsx ./src/main.ts",
+    "build": "npm run clean && tsc",
+    "build:prod": "npm run clean && tsc && npm run build:check",
+    "build:check": "node ./build/main.js",
+    "clean": "rm -rf build",
+    "start": "node ./build/main.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/seelffff/newrep.git"
+  },
+  "keywords": [
+    "typescript",
+    "nodejs",
+    "es-modules"
+  ],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/seelffff/newrep/issues"
+  },
+  "homepage": "https://github.com/seelffff/newrep#readme",
+  "description": "TypeScript project with production-ready build configuration",
+  "devDependencies": {
+    "@types/node": "^25.0.9",
+    "@types/ws": "^8.18.1",
+    "nodemon": "^3.1.11",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@types/blessed": "^0.1.27",
+    "blessed": "^0.1.81",
+    "dotenv": "^17.2.3",
+    "exceljs": "^4.4.0",
+    "winston": "^3.19.0",
+    "ws": "^8.19.0"
+  }
+}
