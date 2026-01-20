@@ -6,7 +6,7 @@ import { MexcFutures } from './exchanges/mexc-futures.js';
 import { TradeExecutor } from './trade-executor.js';
 import { WebSocketMonitor } from './utils/websocket-monitor.js';
 import type { TuiDashboard } from './utils/tui.js';
-
+//
 /**
  * Класс для детектирования арбитражных возможностей
  */
