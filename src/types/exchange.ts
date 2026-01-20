@@ -162,3 +162,16 @@ export interface SkippedOpportunity {
   requiredBalance?: number;
   currentPositionProfit?: number;
 }
+
+/**
+ * Ошибка торговли (создание/закрытие ордеров)
+ */
+export interface TradingError {
+  timestamp: number;
+  symbol: string;
+  operation: 'OPEN_LONG' | 'OPEN_SHORT' | 'CLOSE_LONG' | 'CLOSE_SHORT' | 'SET_LEVERAGE' | 'GET_BALANCE';
+  exchange: ExchangeName;
+  errorCode?: string | number;
+  errorMessage: string;
+  context?: string; // Дополнительный контекст (например, размер позиции)
+}

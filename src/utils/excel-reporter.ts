@@ -1,5 +1,5 @@
 import ExcelJS from 'exceljs';
-import type { PositionPair, SkippedOpportunity, CloseReason } from '../types/exchange.js';
+import type { PositionPair, SkippedOpportunity, CloseReason, TradingError } from '../types/exchange.js';
 import type { WebSocketDowntime } from './websocket-monitor.js';
 import { Logger } from './logger.js';
 
@@ -46,6 +46,7 @@ export class ExcelReporter {
     },
     wsDowntimes: WebSocketDowntime[],
     skippedOpportunities: SkippedOpportunity[],
+    tradingErrors: TradingError[],
     initialBalance: number,
     currentBalance: number,
     sessionStartTime: number,
@@ -74,7 +75,12 @@ export class ExcelReporter {
     // Лист 5: Пропущенные возможности
     this.createSkippedOpportunitiesSheet(workbook, skippedOpportunities);
 
-    // Лист 6: Открытые позиции (если есть)
+    // Лист 6: Ошибки торговли
+    if (tradingErrors && tradingErrors.length > 0) {
+      this.createTradingErrorsSheet(workbook, tradingErrors);
+    }
+
+    // Лист 7: Открытые позиции (если есть)
     if (openPositions && openPositions.length > 0) {
       this.createOpenPositionsSheet(workbook, openPositions);
     }
@@ -685,6 +691,116 @@ export class ExcelReporter {
     if (skippedOpportunities.length === 0) {
       sheet.getCell('A2').value = 'Нет пропущенных возможностей';
       sheet.mergeCells('A2:L2');
+      sheet.getCell('A2').alignment = { horizontal: 'center', vertical: 'middle' };
+      sheet.getCell('A2').font = { italic: true, color: { argb: 'FF808080' } };
+    }
+  }
+
+  /**
+   * Лист 6: Ошибки торговли (API/биржа)
+   */
+  private createTradingErrorsSheet(
+    workbook: ExcelJS.Workbook,
+    tradingErrors: TradingError[]
+  ): void {
+    const sheet = workbook.addWorksheet('Ошибки торговли', {
+      views: [{ showGridLines: true, state: 'frozen', ySplit: 1 }],
+    });
+
+    // Настройка колонок
+    sheet.columns = [
+      { header: 'Дата/Время', key: 'timestamp', width: 20 },
+      { header: 'Symbol', key: 'symbol', width: 15 },
+      { header: 'Биржа', key: 'exchange', width: 12 },
+      { header: 'Операция', key: 'operation', width: 18 },
+      { header: 'Код ошибки', key: 'errorCode', width: 12 },
+      { header: 'Сообщение', key: 'errorMessage', width: 50 },
+      { header: 'Контекст', key: 'context', width: 30 },
+    ];
+
+    // Стиль заголовков
+    sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    sheet.getRow(1).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE74C3C' }, // Красный для ошибок
+    };
+    sheet.getRow(1).alignment = { horizontal: 'center', vertical: 'middle' };
+    sheet.getRow(1).height = 25;
+
+    // Данные
+    tradingErrors.forEach((error) => {
+      const operationMap: Record<string, string> = {
+        'OPEN_LONG': '📈 Открытие LONG',
+        'OPEN_SHORT': '📉 Открытие SHORT',
+        'CLOSE_LONG': '🔒 Закрытие LONG',
+        'CLOSE_SHORT': '🔓 Закрытие SHORT',
+        'SET_LEVERAGE': '⚙️ Установка плеча',
+        'GET_BALANCE': '💵 Получение баланса',
+      };
+
+      const operationText = operationMap[error.operation] || error.operation;
+
+      sheet.addRow({
+        timestamp: new Date(error.timestamp).toLocaleString('ru-RU'),
+        symbol: error.symbol,
+        exchange: error.exchange.toUpperCase(),
+        operation: operationText,
+        errorCode: error.errorCode !== undefined ? error.errorCode.toString() : '-',
+        errorMessage: error.errorMessage,
+        context: error.context || '-',
+      });
+    });
+
+    // Применяем границы ко всем ячейкам
+    const rowCount = sheet.rowCount;
+    const colCount = sheet.columnCount;
+
+    for (let row = 1; row <= rowCount; row++) {
+      for (let col = 1; col <= colCount; col++) {
+        const cell = sheet.getCell(row, col);
+        cell.border = {
+          top: { style: 'thin' },
+          left: { style: 'thin' },
+          bottom: { style: 'thin' },
+          right: { style: 'thin' },
+        };
+      }
+    }
+
+    // Выравнивание для всех ячеек данных
+    for (let row = 2; row <= rowCount; row++) {
+      sheet.getRow(row).alignment = { vertical: 'middle', horizontal: 'left' };
+    }
+
+    // Цветовое кодирование для критических ошибок
+    for (let row = 2; row <= rowCount; row++) {
+      const errorCodeCell = sheet.getCell(row, 5); // Колонка "Код ошибки"
+      const errorCode = errorCodeCell.value?.toString();
+
+      // MEXC error 1002 = Contract not activated (критическая)
+      if (errorCode === '1002') {
+        sheet.getRow(row).fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFFFC7CE' }, // Красный фон
+        };
+        sheet.getRow(row).font = { bold: true };
+      }
+      // Другие ошибки - желтый фон
+      else if (errorCode && errorCode !== '-') {
+        sheet.getRow(row).fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFFFE699' }, // Желтый фон
+        };
+      }
+    }
+
+    // Если нет ошибок
+    if (tradingErrors.length === 0) {
+      sheet.getCell('A2').value = 'Ошибок торговли не зафиксировано';
+      sheet.mergeCells('A2:G2');
       sheet.getCell('A2').alignment = { horizontal: 'center', vertical: 'middle' };
       sheet.getCell('A2').font = { italic: true, color: { argb: 'FF808080' } };
     }

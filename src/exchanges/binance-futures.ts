@@ -225,43 +225,39 @@ export class BinanceFutures {
     const crypto = await import('crypto');
     const timestamp = Date.now();
 
-    // ВАЖНО: Параметры должны быть отсортированы по алфавиту для правильной подписи
-    const paramsObj: Record<string, string> = {
-      quantity: quantity.toString(),
-      side,
-      symbol,
-      timestamp: timestamp.toString(),
-      type: 'MARKET',
-    };
+    // ВАЖНО: Параметры НЕ нужно сортировать! (согласно официальному примеру Binance)
+    // Порядок параметров важен - сохраняем порядок вставки
+    const params: string[] = [];
+    params.push(`symbol=${symbol}`);
+    params.push(`side=${side}`);
+    params.push(`type=MARKET`);
+    params.push(`quantity=${quantity.toString()}`);
 
     // Добавляем reduceOnly только если true (для закрытия позиций)
     if (reduceOnly) {
-      paramsObj.reduceOnly = 'true';
+      params.push('reduceOnly=true');
     }
 
-    // Сортируем параметры и создаем query string
-    const queryString = Object.keys(paramsObj)
-      .sort()
-      .map(key => `${key}=${paramsObj[key]}`)
-      .join('&');
+    params.push(`timestamp=${timestamp}`);
+    params.push('recvWindow=5000');  // 5 секунд окно для синхронизации времени
+
+    // Создаем query string БЕЗ сортировки
+    const queryString = params.join('&');
 
     const signature = crypto
       .createHmac('sha256', this.apiSecret)
       .update(queryString)
       .digest('hex');
 
-    const finalQueryString = `${queryString}&signature=${signature}`;
-
-    const url = `${this.restBaseUrl}/fapi/v1/order`;
+    // ВАЖНО: Для Binance Futures все параметры идут в URL query string, даже для POST!
+    const url = `${this.restBaseUrl}/fapi/v1/order?${queryString}&signature=${signature}`;
 
     try {
       const response = await fetch(url, {
         method: 'POST',
         headers: {
           'X-MBX-APIKEY': this.apiKey,
-          'Content-Type': 'application/x-www-form-urlencoded',
         },
-        body: finalQueryString,
       });
 
       if (!response.ok) {
@@ -289,36 +285,30 @@ export class BinanceFutures {
     const crypto = await import('crypto');
     const timestamp = Date.now();
 
-    // ВАЖНО: Параметры должны быть отсортированы по алфавиту для правильной подписи
-    const paramsObj: Record<string, string> = {
-      leverage: leverage.toString(),
-      symbol,
-      timestamp: timestamp.toString(),
-    };
+    // ВАЖНО: Параметры НЕ нужно сортировать! (согласно официальному примеру Binance)
+    const params: string[] = [];
+    params.push(`symbol=${symbol}`);
+    params.push(`leverage=${leverage}`);
+    params.push(`timestamp=${timestamp}`);
+    params.push('recvWindow=5000');  // 5 секунд окно для синхронизации времени
 
-    // Сортируем параметры и создаем query string
-    const queryString = Object.keys(paramsObj)
-      .sort()
-      .map(key => `${key}=${paramsObj[key]}`)
-      .join('&');
+    // Создаем query string БЕЗ сортировки
+    const queryString = params.join('&');
 
     const signature = crypto
       .createHmac('sha256', this.apiSecret)
       .update(queryString)
       .digest('hex');
 
-    const finalQueryString = `${queryString}&signature=${signature}`;
-
-    const url = `${this.restBaseUrl}/fapi/v1/leverage`;
+    // ВАЖНО: Для Binance Futures все параметры идут в URL query string, даже для POST!
+    const url = `${this.restBaseUrl}/fapi/v1/leverage?${queryString}&signature=${signature}`;
 
     try {
       const response = await fetch(url, {
         method: 'POST',
         headers: {
           'X-MBX-APIKEY': this.apiKey,
-          'Content-Type': 'application/x-www-form-urlencoded',
         },
-        body: finalQueryString,
       });
 
       if (!response.ok) {
@@ -344,7 +334,7 @@ export class BinanceFutures {
     const crypto = await import('crypto');
     const timestamp = Date.now();
 
-    const queryString = `timestamp=${timestamp}`;
+    const queryString = `timestamp=${timestamp}&recvWindow=5000`;
 
     const signature = crypto
       .createHmac('sha256', this.apiSecret)

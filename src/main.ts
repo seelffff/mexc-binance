@@ -54,6 +54,7 @@ async function main() {
           const stats = tradeExecutor.getStats();
           const closedPositions = tradeExecutor.getClosedPositions();
           const skippedOpportunities = tradeExecutor.getSkippedOpportunities();
+          const tradingErrors = tradeExecutor.getTradingErrors();
           const wsDowntimes = detector.getWsMonitor().getDowntimes();
 
           // 3. Сгенерировать отчет
@@ -64,6 +65,7 @@ async function main() {
             stats,
             wsDowntimes,
             skippedOpportunities,
+            tradingErrors,
             tradeExecutor.getInitialBalance(),
             tradeExecutor.getCurrentBalance(),
             sessionStartTime,
@@ -104,7 +106,7 @@ async function main() {
     const startTime = Date.now();
     const tradeExecutor = detector.getTradeExecutor();
 
-    setInterval(() => {
+    setInterval(async () => {
         const uptimeSeconds = Math.floor((Date.now() - startTime) / 1000);
         const h = Math.floor(uptimeSeconds / 3600);
         const m = Math.floor((uptimeSeconds % 3600) / 60);
@@ -127,12 +129,28 @@ async function main() {
         const realizedPnlPercent = (realizedPnl / initialBalance) * 100;
         const pnlColor = realizedPnl >= 0 ? '{green-fg}' : '{red-fg}';
 
-        // Свободный баланс
-        const freeBalance = tradeExecutor.getCurrentBalance();
+        // Получаем балансы с каждой биржи
+        let balanceText: string;
+        if (!config.trading.testMode) {
+          // В реальном режиме показываем балансы каждой биржи
+          try {
+            const balances = await tradeExecutor.getExchangeBalances();
+            const totalBalance = balances.binance + balances.mexc;
+            balanceText = `Binance: $${balances.binance.toFixed(0)}, MEXC: $${balances.mexc.toFixed(0)}, Sum: $${totalBalance.toFixed(0)} (+$${inPositions.toFixed(0)} в поз.)`;
+          } catch (error) {
+            // Если не удалось получить балансы, показываем как раньше
+            const freeBalance = tradeExecutor.getCurrentBalance();
+            balanceText = `$${freeBalance.toFixed(0)} (+$${inPositions.toFixed(0)} в поз.)`;
+          }
+        } else {
+          // В тестовом режиме показываем один общий баланс
+          const freeBalance = tradeExecutor.getCurrentBalance();
+          balanceText = `[TEST] $${freeBalance.toFixed(0)} (+$${inPositions.toFixed(0)} в поз.)`;
+        }
 
         tui.updateHeader({
             uptime,
-            balance: `$${freeBalance.toFixed(0)} (+$${inPositions.toFixed(0)} в поз.)`,
+            balance: balanceText,
             pnl: `${pnlColor}${realizedPnl >= 0 ? '+' : ''}$${realizedPnl.toFixed(2)} (${realizedPnlPercent.toFixed(2)}%){/}`
         });
     }, 1000);

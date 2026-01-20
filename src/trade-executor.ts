@@ -5,6 +5,7 @@ import type {
   SkippedOpportunity,
   CloseReason,
   PriceSnapshot,
+  TradingError,
 } from './types/exchange.js';
 import type { Config } from './types/config.js';
 import { Logger } from './utils/logger.js';
@@ -25,6 +26,7 @@ export class TradeExecutor {
   private openPositions: Map<string, PositionPair> = new Map();
   private closedPositions: PositionPair[] = [];
   private skippedOpportunities: SkippedOpportunity[] = [];
+  private tradingErrors: TradingError[] = []; // Ошибки торговли (API calls)
 
   private checkInterval: NodeJS.Timeout | null = null;
   private priceHistoryInterval: NodeJS.Timeout | null = null;
@@ -291,7 +293,16 @@ export class TradeExecutor {
             await this.binance.setLeverage(opportunity.symbol, this.config.trading.leverage);
           }
         } catch (error) {
-          this.logger.warn(`Binance leverage warning (продолжаем): ${error instanceof Error ? error.message : String(error)}`);
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          this.logger.warn(`Binance leverage warning (продолжаем): ${errorMsg}`);
+          this.recordTradingError({
+            timestamp: Date.now(),
+            symbol: opportunity.symbol,
+            operation: 'SET_LEVERAGE',
+            exchange: 'binance',
+            errorMessage: errorMsg,
+            context: `Leverage: ${this.config.trading.leverage}x`,
+          });
         }
 
         try {
@@ -303,44 +314,93 @@ export class TradeExecutor {
             await this.mexc.setLeverage(mexcSymbol, this.config.trading.leverage);
           }
         } catch (error) {
-          this.logger.warn(`MEXC leverage warning (продолжаем): ${error instanceof Error ? error.message : String(error)}`);
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          this.logger.warn(`MEXC leverage warning (продолжаем): ${errorMsg}`);
+
+          // Парсим код ошибки из сообщения
+          const errorCodeMatch = errorMsg.match(/code[":]+(\d+)/i);
+          const errorCode = errorCodeMatch ? parseInt(errorCodeMatch[1]) : undefined;
+
+          this.recordTradingError({
+            timestamp: Date.now(),
+            symbol: opportunity.symbol,
+            operation: 'SET_LEVERAGE',
+            exchange: 'mexc',
+            errorCode,
+            errorMessage: errorMsg,
+            context: `Leverage: ${this.config.trading.leverage}x`,
+          });
         }
 
         // Открываем LONG позицию
-        if (longPosition.exchange === 'binance' && this.binance) {
-          await this.binance.createMarketOrder(
-            opportunity.symbol,
-            'BUY',
-            longPosition.quantity,
-            false
-          );
-        } else if (longPosition.exchange === 'mexc' && this.mexc) {
-          const mexcSymbol = opportunity.symbol.replace('USDT', '_USDT');
-          await this.mexc.createMarketOrder(
-            mexcSymbol,
-            1, // Open Long
-            Math.floor(longPosition.quantity)
-          );
+        try {
+          if (longPosition.exchange === 'binance' && this.binance) {
+            await this.binance.createMarketOrder(
+              opportunity.symbol,
+              'BUY',
+              longPosition.quantity,
+              false
+            );
+          } else if (longPosition.exchange === 'mexc' && this.mexc) {
+            const mexcSymbol = opportunity.symbol.replace('USDT', '_USDT');
+            await this.mexc.createMarketOrder(
+              mexcSymbol,
+              1, // Open Long
+              Math.floor(longPosition.quantity)
+            );
+          }
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          const errorCodeMatch = errorMsg.match(/code[":]+(\d+)/i);
+          const errorCode = errorCodeMatch ? parseInt(errorCodeMatch[1]) : undefined;
+
+          this.recordTradingError({
+            timestamp: Date.now(),
+            symbol: opportunity.symbol,
+            operation: 'OPEN_LONG',
+            exchange: longPosition.exchange,
+            errorCode,
+            errorMessage: errorMsg,
+            context: `Size: $${this.config.trading.positionSizeUSD}, Qty: ${longPosition.quantity.toFixed(4)}`,
+          });
+          throw error; // Пробрасываем дальше чтобы не открывать SHORT если LONG провалился
         }
 
         // Задержка 500ms между ордерами для предотвращения rate limit
         await new Promise(resolve => setTimeout(resolve, 500));
 
         // Открываем SHORT позицию
-        if (shortPosition.exchange === 'binance' && this.binance) {
-          await this.binance.createMarketOrder(
-            opportunity.symbol,
-            'SELL',
-            shortPosition.quantity,
-            false
-          );
-        } else if (shortPosition.exchange === 'mexc' && this.mexc) {
-          const mexcSymbol = opportunity.symbol.replace('USDT', '_USDT');
-          await this.mexc.createMarketOrder(
-            mexcSymbol,
-            3, // Open Short
-            Math.floor(shortPosition.quantity)
-          );
+        try {
+          if (shortPosition.exchange === 'binance' && this.binance) {
+            await this.binance.createMarketOrder(
+              opportunity.symbol,
+              'SELL',
+              shortPosition.quantity,
+              false
+            );
+          } else if (shortPosition.exchange === 'mexc' && this.mexc) {
+            const mexcSymbol = opportunity.symbol.replace('USDT', '_USDT');
+            await this.mexc.createMarketOrder(
+              mexcSymbol,
+              3, // Open Short
+              Math.floor(shortPosition.quantity)
+            );
+          }
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          const errorCodeMatch = errorMsg.match(/code[":]+(\d+)/i);
+          const errorCode = errorCodeMatch ? parseInt(errorCodeMatch[1]) : undefined;
+
+          this.recordTradingError({
+            timestamp: Date.now(),
+            symbol: opportunity.symbol,
+            operation: 'OPEN_SHORT',
+            exchange: shortPosition.exchange,
+            errorCode,
+            errorMessage: errorMsg,
+            context: `Size: $${this.config.trading.positionSizeUSD}, Qty: ${shortPosition.quantity.toFixed(4)}`,
+          });
+          throw error;
         }
 
         this.logger.success(`✓ РЕАЛЬНЫЕ ОРДЕРА СОЗДАНЫ: ${opportunity.symbol}`);
@@ -379,18 +439,56 @@ export class TradeExecutor {
       this.currentBalance -= requiredCapital;
     } else {
       // В реальном режиме получаем актуальный баланс с биржи
-      try {
-        if (this.binance) {
-          const binanceBalance = await this.binance.getBalance();
-          if (this.mexc) {
-            const mexcBalance = await this.mexc.getBalance();
-            this.currentBalance = Math.min(binanceBalance, mexcBalance);
-          } else {
-            this.currentBalance = binanceBalance;
-          }
+      let binanceBalance = 0;
+      let mexcBalance = 0;
+
+      if (this.binance) {
+        try {
+          binanceBalance = await this.binance.getBalance();
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          const errorCodeMatch = errorMsg.match(/code[":]+(\d+)/i);
+          const errorCode = errorCodeMatch ? parseInt(errorCodeMatch[1]) : undefined;
+
+          this.recordTradingError({
+            timestamp: Date.now(),
+            symbol: opportunity.symbol,
+            operation: 'GET_BALANCE',
+            exchange: 'binance',
+            errorCode,
+            errorMessage: errorMsg,
+          });
+          this.logger.warn(`Не удалось получить баланс Binance: ${errorMsg}`);
         }
-      } catch (error) {
-        this.logger.warn(`Не удалось получить реальный баланс: ${error}`);
+      }
+
+      if (this.mexc) {
+        try {
+          mexcBalance = await this.mexc.getBalance();
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          const errorCodeMatch = errorMsg.match(/code[":]+(\d+)/i);
+          const errorCode = errorCodeMatch ? parseInt(errorCodeMatch[1]) : undefined;
+
+          this.recordTradingError({
+            timestamp: Date.now(),
+            symbol: opportunity.symbol,
+            operation: 'GET_BALANCE',
+            exchange: 'mexc',
+            errorCode,
+            errorMessage: errorMsg,
+          });
+          this.logger.warn(`Не удалось получить баланс MEXC: ${errorMsg}`);
+        }
+      }
+
+      // Устанавливаем баланс как минимум из двух
+      if (binanceBalance > 0 && mexcBalance > 0) {
+        this.currentBalance = Math.min(binanceBalance, mexcBalance);
+      } else if (binanceBalance > 0) {
+        this.currentBalance = binanceBalance;
+      } else if (mexcBalance > 0) {
+        this.currentBalance = mexcBalance;
       }
     }
 
@@ -498,10 +596,10 @@ export class TradeExecutor {
 
     // ===== РЕАЛЬНАЯ ТОРГОВЛЯ: Закрываем позиции =====
     if (!this.config.trading.testMode) {
-      try {
-        this.logger.warn(`⚠️  РЕАЛЬНАЯ ТОРГОВЛЯ: Закрываем позицию ${pair.symbol}...`);
+      this.logger.warn(`⚠️  РЕАЛЬНАЯ ТОРГОВЛЯ: Закрываем позицию ${pair.symbol}...`);
 
-        // Закрываем LONG позицию (продаем то что купили)
+      // Закрываем LONG позицию (продаем то что купили)
+      try {
         if (pair.longPosition.exchange === 'binance' && this.binance) {
           await this.binance.createMarketOrder(
             pair.symbol,
@@ -509,6 +607,7 @@ export class TradeExecutor {
             pair.longPosition.quantity,
             true // reduceOnly = true для закрытия позиции
           );
+          this.logger.success(`✓ CLOSE LONG на Binance: ${pair.symbol}`);
         } else if (pair.longPosition.exchange === 'mexc' && this.mexc) {
           const mexcSymbol = pair.symbol.replace('USDT', '_USDT');
           await this.mexc.createMarketOrder(
@@ -516,12 +615,31 @@ export class TradeExecutor {
             4, // Close Long
             Math.floor(pair.longPosition.quantity)
           );
+          this.logger.success(`✓ CLOSE LONG на MEXC: ${mexcSymbol}`);
         }
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        const errorCodeMatch = errorMsg.match(/code[":]+(\d+)/i);
+        const errorCode = errorCodeMatch ? parseInt(errorCodeMatch[1]) : undefined;
 
-        // Задержка 500ms между ордерами для предотвращения rate limit
-        await new Promise(resolve => setTimeout(resolve, 500));
+        this.recordTradingError({
+          timestamp: Date.now(),
+          symbol: pair.symbol,
+          operation: 'CLOSE_LONG',
+          exchange: pair.longPosition.exchange,
+          errorCode,
+          errorMessage: errorMsg,
+          context: `Qty: ${pair.longPosition.quantity}, Exit: ${currentBuyPrice.toFixed(4)}`,
+        });
 
-        // Закрываем SHORT позицию (покупаем обратно то что продали)
+        this.logger.error(`❌ ОШИБКА CLOSE LONG на ${pair.longPosition.exchange.toUpperCase()}: ${errorMsg}`);
+      }
+
+      // Задержка 500ms между ордерами для предотвращения rate limit
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      // Закрываем SHORT позицию (покупаем обратно то что продали)
+      try {
         if (pair.shortPosition.exchange === 'binance' && this.binance) {
           await this.binance.createMarketOrder(
             pair.symbol,
@@ -529,6 +647,7 @@ export class TradeExecutor {
             pair.shortPosition.quantity,
             true // reduceOnly = true
           );
+          this.logger.success(`✓ CLOSE SHORT на Binance: ${pair.symbol}`);
         } else if (pair.shortPosition.exchange === 'mexc' && this.mexc) {
           const mexcSymbol = pair.symbol.replace('USDT', '_USDT');
           await this.mexc.createMarketOrder(
@@ -536,13 +655,27 @@ export class TradeExecutor {
             2, // Close Short
             Math.floor(pair.shortPosition.quantity)
           );
+          this.logger.success(`✓ CLOSE SHORT на MEXC: ${mexcSymbol}`);
         }
-
-        this.logger.success(`✓ РЕАЛЬНЫЕ ПОЗИЦИИ ЗАКРЫТЫ: ${pair.symbol}`);
       } catch (error) {
-        this.logger.error(`ОШИБКА закрытия реальных позиций: ${error instanceof Error ? error.message : String(error)}`);
-        // Продолжаем обработку даже если реальное закрытие не удалось (позиция будет помечена как закрытая локально)
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        const errorCodeMatch = errorMsg.match(/code[":]+(\d+)/i);
+        const errorCode = errorCodeMatch ? parseInt(errorCodeMatch[1]) : undefined;
+
+        this.recordTradingError({
+          timestamp: Date.now(),
+          symbol: pair.symbol,
+          operation: 'CLOSE_SHORT',
+          exchange: pair.shortPosition.exchange,
+          errorCode,
+          errorMessage: errorMsg,
+          context: `Qty: ${pair.shortPosition.quantity}, Exit: ${currentSellPrice.toFixed(4)}`,
+        });
+
+        this.logger.error(`❌ ОШИБКА CLOSE SHORT на ${pair.shortPosition.exchange.toUpperCase()}: ${errorMsg}`);
       }
+
+      this.logger.success(`✓ РЕАЛЬНЫЕ ПОЗИЦИИ ЗАКРЫТЫ: ${pair.symbol}`);
     }
     // ===== КОНЕЦ РЕАЛЬНОЙ ТОРГОВЛИ =====
 
@@ -554,18 +687,56 @@ export class TradeExecutor {
       this.currentBalance += (this.config.trading.positionSizeUSD * 2) + totalPnlUSD;
     } else {
       // В реальном режиме получаем актуальный баланс с биржи
-      try {
-        if (this.binance) {
-          const binanceBalance = await this.binance.getBalance();
-          if (this.mexc) {
-            const mexcBalance = await this.mexc.getBalance();
-            this.currentBalance = Math.min(binanceBalance, mexcBalance);
-          } else {
-            this.currentBalance = binanceBalance;
-          }
+      let binanceBalance = 0;
+      let mexcBalance = 0;
+
+      if (this.binance) {
+        try {
+          binanceBalance = await this.binance.getBalance();
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          const errorCodeMatch = errorMsg.match(/code[":]+(\d+)/i);
+          const errorCode = errorCodeMatch ? parseInt(errorCodeMatch[1]) : undefined;
+
+          this.recordTradingError({
+            timestamp: Date.now(),
+            symbol: pair.symbol,
+            operation: 'GET_BALANCE',
+            exchange: 'binance',
+            errorCode,
+            errorMessage: errorMsg,
+          });
+          this.logger.warn(`Не удалось получить баланс Binance: ${errorMsg}`);
         }
-      } catch (error) {
-        this.logger.warn(`Не удалось получить реальный баланс: ${error}`);
+      }
+
+      if (this.mexc) {
+        try {
+          mexcBalance = await this.mexc.getBalance();
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          const errorCodeMatch = errorMsg.match(/code[":]+(\d+)/i);
+          const errorCode = errorCodeMatch ? parseInt(errorCodeMatch[1]) : undefined;
+
+          this.recordTradingError({
+            timestamp: Date.now(),
+            symbol: pair.symbol,
+            operation: 'GET_BALANCE',
+            exchange: 'mexc',
+            errorCode,
+            errorMessage: errorMsg,
+          });
+          this.logger.warn(`Не удалось получить баланс MEXC: ${errorMsg}`);
+        }
+      }
+
+      // Устанавливаем баланс как минимум из двух
+      if (binanceBalance > 0 && mexcBalance > 0) {
+        this.currentBalance = Math.min(binanceBalance, mexcBalance);
+      } else if (binanceBalance > 0) {
+        this.currentBalance = binanceBalance;
+      } else if (mexcBalance > 0) {
+        this.currentBalance = mexcBalance;
       }
     }
 
@@ -588,19 +759,66 @@ export class TradeExecutor {
 
   // ... остальные геттеры (getStats, stop, etc) без изменений ...
   getOpenPositions() { return this.openPositions; }
-  getStats() { 
-      return { 
-          openPositions: this.openPositions.size, 
-          closedPositions: this.closedPositions.length, 
+  getStats() {
+      return {
+          openPositions: this.openPositions.size,
+          closedPositions: this.closedPositions.length,
           testStats: this.testStats,
           winRate: this.testStats.totalTrades > 0 ? (this.testStats.profitableTrades / this.testStats.totalTrades * 100) : 0,
           netProfit: this.testStats.totalProfit - this.testStats.totalLoss
-      }; 
+      };
   }
   getSkippedOpportunities() { return this.skippedOpportunities; }
+  getTradingErrors() { return this.tradingErrors; }
+
+  /**
+   * Записать ошибку торговли
+   */
+  private recordTradingError(error: TradingError): void {
+    this.tradingErrors.push(error);
+
+    // Показываем в TUI если есть
+    if (this.tui) {
+      const emoji = error.errorCode === 1002 ? '🔒' : '❌';
+      this.tui.log(`{red-fg}${emoji} ${error.exchange.toUpperCase()} ${error.operation}: ${error.errorMessage}{/}`);
+    }
+  }
   getInitialBalance() { return this.initialBalance; }
   getCurrentBalance() { return this.currentBalance; }
   getClosedPositions() { return this.closedPositions; }
+
+  /**
+   * Получить балансы с каждой биржи отдельно
+   */
+  async getExchangeBalances(): Promise<{ binance: number; mexc: number }> {
+    let binanceBalance = 0;
+    let mexcBalance = 0;
+
+    if (!this.config.trading.testMode) {
+      // Получаем реальные балансы только в production режиме
+      if (this.binance) {
+        try {
+          binanceBalance = await this.binance.getBalance();
+        } catch (error) {
+          // Ошибка уже залогирована в recordTradingError
+        }
+      }
+
+      if (this.mexc) {
+        try {
+          mexcBalance = await this.mexc.getBalance();
+        } catch (error) {
+          // Ошибка уже залогирована в recordTradingError
+        }
+      }
+    } else {
+      // В тестовом режиме возвращаем текущий баланс для обеих бирж
+      binanceBalance = this.currentBalance;
+      mexcBalance = this.currentBalance;
+    }
+
+    return { binance: binanceBalance, mexc: mexcBalance };
+  }
   getCompactLogger() { return this.compactLogger; } // Для совместимости
 
   recordSkippedOpportunity(_opp: ArbitrageOpportunity, _reason: unknown) {
