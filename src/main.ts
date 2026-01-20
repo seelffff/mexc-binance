@@ -3,6 +3,7 @@ import { ArbitrageDetector } from './arbitrage-detector.js';
 import { TuiDashboard } from './utils/tui.js';
 import { Logger } from './utils/logger.js';
 import { ExcelReporter } from './utils/excel-reporter.js';
+import { ApiValidator } from './utils/api-validator.js';
 
 async function main() {
   // 1. Сразу инициализируем TUI (Без проверок!)
@@ -38,6 +39,29 @@ async function main() {
       }
     );
     detector.setTui(tui); // Обязательно связываем!
+
+    // 4.5. Проверка API ключей перед торговлей
+    tui.log('{cyan-fg}Проверка API ключей...{/}');
+
+    const validator = new ApiValidator(logger, tui);
+    const binanceInstance = detector.getBinanceFutures();
+    const mexcInstance = detector.getMexcFutures();
+
+    const validationResult = await validator.validateAll(
+      binanceInstance,
+      mexcInstance,
+      { binance: config.exchanges.binance.enabled, mexc: config.exchanges.mexc.enabled }
+    );
+
+    if (!validationResult.success) {
+      tui.log('{red-fg}❌ Торговля не может быть запущена из-за ошибок API{/}');
+      tui.log('{yellow-fg}Проверьте конфигурацию и API ключи в .env{/}');
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      tui.destroy();
+      process.exit(1);
+    }
+
+    tui.log('{green-fg}✅ Все API ключи работают корректно!{/}');
 
     // 5. Обработка graceful shutdown (Ctrl+C)
     const gracefulShutdown = async () => {

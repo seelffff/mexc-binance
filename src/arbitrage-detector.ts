@@ -328,4 +328,18 @@ export class ArbitrageDetector {
   getWsMonitor(): WebSocketMonitor {
     return this.wsMonitor;
   }
+
+  /**
+   * Получить ссылку на Binance Futures (для API проверки)
+   */
+  getBinanceFutures(): BinanceFutures {
+    return this.binance;
+  }
+
+  /**
+   * Получить ссылку на MEXC Futures (для API проверки)
+   */
+  getMexcFutures(): MexcFutures {
+    return this.mexc;
+  }
 }
